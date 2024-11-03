@@ -1,0 +1,167 @@
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Camera = game:GetService("Workspace").CurrentCamera
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+
+local lastClickTime = 0
+local isToggled = false
+
+local AllBodyParts = {
+    "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart", "LeftHand", "RightHand", 
+    "LeftLowerArm", "RightLowerArm", "LeftUpperArm", "RightUpperArm", "LeftFoot", 
+    "LeftLowerLeg", "LeftUpperLeg", "RightLowerLeg", "RightUpperLeg", "RightFoot"
+}
+
+function Forlorn.mouse1click(x, y)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, false)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, false)
+end
+
+local function getMousePosition()
+    local mouse = UserInputService:GetMouseLocation()
+    return mouse.X, mouse.Y
+end
+
+local function isWithinBoxFOV(position)
+    local screenPos = Camera:WorldToViewportPoint(position)
+    local screenCenter = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local fovHeight = getgenv().Forbidden.TriggerBot.Settings.BoxFOVSize.Height * 100
+    local fovWidth = getgenv().Forbidden.TriggerBot.Settings.BoxFOVSize.Width * 100
+
+    return (Vector2.new(screenPos.X, screenPos.Y) - screenCenter).Magnitude <= math.sqrt((fovHeight / 2)^2 + (fovWidth / 2)^2)
+end
+
+local function getPredictedPosition(character)
+    local primaryPart = character:FindFirstChild("HumanoidRootPart") or character:FindFirstChild("Head")
+    if primaryPart then
+        local velocity = primaryPart.Velocity
+        local acceleration = primaryPart.AssemblyLinearVelocity - velocity
+        local predictionMultiplier = getgenv().Forbidden.TriggerBot.Settings.Preds.PredictionMultiplier
+        local timeToPredict = getgenv().Forbidden.TriggerBot.Settings.Preds.TimeToPredict or 0.1
+
+        -- Improved prediction calculation for moving targets
+        local predictedPosition = primaryPart.Position + (velocity * timeToPredict * predictionMultiplier) + (0.5 * acceleration * (timeToPredict ^ 2))
+        
+        -- Adjustment for airborne/moving targets
+        if character.Humanoid:GetState() == Enum.HumanoidStateType.Freefall then
+            predictedPosition = predictedPosition + Vector3.new(0, -0.5, 0) -- Predict for slight downward movement in the air
+        end
+        
+        return predictedPosition
+    end
+    return nil
+end
+
+local function findClosestPart(character)
+    local closestPart, closestDistance = nil, math.huge
+    for _, partName in ipairs(AllBodyParts) do
+        local part = character:FindFirstChild(partName)
+        if part then
+            local distance = (part.Position - LocalPlayer.Character.PrimaryPart.Position).Magnitude
+            if distance < closestDistance then
+                closestDistance, closestPart = distance, part
+            end
+        end
+    end
+    return closestPart
+end
+
+local function adjustAimForTarget(targetPosition)
+    local screenPosition, onScreen = Camera:WorldToViewportPoint(targetPosition)
+    if onScreen then
+        local centerX = Camera.ViewportSize.X / 2
+        local centerY = Camera.ViewportSize.Y / 2
+
+        local offsetX = screenPosition.X - centerX
+        local offsetY = screenPosition.Y - centerY
+
+        -- Prevent mouse teleportation
+        VirtualInputManager:SendMouseMoveEvent(centerX + offsetX / 4, centerY + offsetY / 4, game) -- Adjust sensitivity
+    end
+end
+
+local function isIgnoringKnife()
+    local currentTool = LocalPlayer.Character:FindFirstChildOfClass("Tool")
+    if currentTool then
+        local toolName = currentTool.Name:lower() -- Convert tool name to lowercase for case-insensitive check
+        return toolName == "knife" or toolName == "katana" or toolName == "[knife]" or toolName == "[katana]"
+    end
+    return false
+end
+
+local function TriggerBotAction()
+    -- Check for knife/katana
+    if getgenv().Forbidden.TriggerBot.Settings.Preds.Safety.IgnoreKnife and isIgnoringKnife() then
+        return -- Exit if IgnoreKnife is enabled and a knife/katana is equipped
+    end
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local humanoid = player.Character:FindFirstChild("Humanoid")
+            if humanoid and humanoid.Health > 0 then
+                local closestPart = findClosestPart(player.Character)
+                if closestPart then
+                    local predictedPosition = getPredictedPosition(player.Character)
+                    if predictedPosition and isWithinBoxFOV(predictedPosition) then
+                        -- Set lastClickTime to near-zero for maximum shooting speed
+                        if os.clock() - lastClickTime >= 0.001 then
+                            lastClickTime = os.clock()
+                            
+                            adjustAimForTarget(closestPart.Position)
+
+                            local tool = LocalPlayer.Character:FindFirstChildOfClass("Tool")
+                            if tool and tool:IsA("Tool") then
+                                local shootFunction = tool:FindFirstChild("Fire")
+                                if shootFunction and shootFunction:IsA("RemoteEvent") then
+                                    shootFunction:FireServer(player.Character)
+                                else
+                                    local mouseX, mouseY = getMousePosition()
+                                    Forlorn.mouse1click(mouseX, mouseY)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function handleShootingMode()
+    if getgenv().Forbidden.TriggerBot.Settings.Mode == "toggle" then
+        isToggled = not isToggled
+    else
+        RunService:BindToRenderStep("TriggerBotHold", Enum.RenderPriority.Input.Value, TriggerBotAction)
+    end
+end
+
+LocalPlayer.CharacterAdded:Connect(function(character)
+    local humanoid = character:WaitForChild("Humanoid")
+    humanoid.Jumping:Connect(function(isJumping)
+        if isJumping and isToggled then
+            TriggerBotAction()
+        end
+    end)
+end)
+
+UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == getgenv().Forbidden.TriggerBot.Keybinds.Shoot then
+        handleShootingMode()
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input, gameProcessed)
+    if input.KeyCode == getgenv().Forbidden.TriggerBot.Keybinds.Shoot then
+        if getgenv().Forbidden.TriggerBot.Settings.Mode == "hold" then
+            RunService:UnbindFromRenderStep("TriggerBotHold")
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if getgenv().Forbidden.TriggerBot.Settings.Mode == "hold" and UserInputService:IsKeyDown(getgenv().Forbidden.TriggerBot.Keybinds.Shoot) then
+        TriggerBotAction()
+    end
+end)
